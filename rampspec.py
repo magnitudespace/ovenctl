@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright Solarflare Communications Inc., 2012-13
 # All rights reserved.
@@ -25,7 +25,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import time, optparse, math, sys, operator
+import time, optparse, math, sys, operator, datetime
 
 def MacroRepeat(args, text):
     count = int(args)
@@ -84,7 +84,7 @@ class RSAction:
         argstr = string[1:]
         while len(argstr):
             arg = argstr[0]
-            if arg in map(lambda arg: arg.arg, self.args):
+            if arg in [arg.arg for arg in self.args]:
                 raise RSParseException("Argument", arg, "specified twice")
             if arg not in RSArgumentEnum:
                 raise RSParseException("No such argument", arg)
@@ -110,14 +110,14 @@ class RSAction:
     def __str__(self):
         return self.act + ','.join(map(str, self.args))
     def __getitem__(self, arg):
-        items = filter(lambda a: a.arg==arg, self.args)
+        items = [a for a in self.args if a.arg==arg]
         if len(items) > 1:
             raise Exception("Multiple values for argument", arg)
         elif not len(items):
             raise KeyError(arg)
         return items[0].value
     def __contains__(self, arg):
-        items = filter(lambda a: a.arg==arg, self.args)
+        items = [a for a in self.args if a.arg==arg]
         return len(items) == 1
     def duration(self):
         try:
@@ -255,13 +255,13 @@ class RampCtl:
             raise Exception("Unrecognised action", action.act)
         self.oven.bedew_protection = ('d' in action and action['d'] and self.oven.get_setpoint()<20)
         self.new_action = False
-        if finished: self.next()
+        if finished: next(self)
         if jump_to is not None:
             while len(self.actions):
                 if self.actions[0].label == jump_to: break
-                self.next()
+                next(self)
         return len(self.actions)
-    def next(self):
+    def __next__(self):
         self.new_action = True
         self.actions = self.actions[1:]
         self.act_start = time.time()/3600.0
@@ -277,11 +277,11 @@ def parse_cmdline():
     options, args = parser.parse_args()
 
     if not options.host:
-        print "ERROR: -H/--host is required"
+        print("ERROR: -H/--host is required")
         sys.exit(2)
 
     if not options.rampspec:
-        print "ERROR: -r/--rampspec is required"
+        print("ERROR: -r/--rampspec is required")
         sys.exit(2)
 
     return options
@@ -293,7 +293,7 @@ if __name__ == '__main__':
     oven = ovenctl.OvenCtl(options.host, options.port)
     rc=rs.prepare(oven)
     while True:
-        if rc.new_action: print "Started action: %s" % rc.actions[0]
+        if rc.new_action: print("LOG: ", datetime.datetime.now().isoformat(), " Started action: %s" % rc.actions[0])
         try:
             if not rc.run(): break
         except socket.error: pass

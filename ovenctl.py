@@ -24,6 +24,7 @@
 # ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+from binascii import crc32
 
 """Control a BINDER oven (MK 53) remotely over MODBus through TCP/IP
 
@@ -75,6 +76,12 @@ class OvenStatusException (derived from Exception) is the base class for
   Derived classes:
     OvenIdleException: Oven is in Idle mode
     OvenSetChangedException: Temperature setpoint was changed"""
+    
+'''
+Andrew Connell -
+
+Modifications made for MKF 56 Chamber - Uses Base address table for MB2, original was MB1
+'''
 import sys, socket, struct, optparse, time
 
 BINDER_PORT = 10001
@@ -114,25 +121,38 @@ MB_ENAMES = {
 # Oven register addresses
 #  Current temperature
 #   techspec 2.11.7: Process value 1, float, R/O, temperature
-OVENADDR_CURTEMP    = 0x11a9
+#OVENADDR_CURTEMP    = 0x11a9
+#   techspec 2.11.14: Process value 1, float, R/O, temperature
+OVENADDR_CURTEMP    = 0x1004
+#
+# Current Humidity
+OVENADDR_CURHUM    = 0x100A
+#  Current set point - Humidity
+OVENADDR_HUMIDITY_SETPOINT   = 0x10B4
+
 #  Current set point
 #   techspec 2.11.7: Set point 1, float, R/O, temperature
-OVENADDR_SETPOINT   = 0x1077
+#OVENADDR_SETPOINT   = 0x1077
+#   techspec 2.11.14: Set point 1, float, R/O, temperature
+OVENADDR_SETPOINT   = 0x10B2
 #  Manual set point
 #   techspec 2.11.7: Set point 1 manual, float, R/W, temperature
-OVENADDR_MANSETPT   = 0x1581
-#  APT-COM set point
-#   techspec 2.11.7: Set point 1 basic, float, R/W, temperature - weird things
-OVENADDR_BASICSETPT = 0x156f
-#  Operating mode
-#   techspec 2.11.7: Mode read, int, R/W, flags
-#   techspec 2.11.7: Mode manual on, int, R/W, Write value = 0x0800(*)see notes
-OVENADDR_MODE       = 0x1a22
+#OVENADDR_MANSETPT   = 0x1581
+#   techspec 2.11.14: Set point 1 manual, float, R/W, temperature
+OVENADDR_MANSETPT   = 0x114C
 #  Operation lines (bit 0 is bedew protection)
 #   techspec 2.11.7: Track manual, int, R/W, bit 0-7 = track 0-7
-OVENADDR_OPLINES    = 0x158b
+#
+# Set Humidity
+OVENADDR_HUMIDITY_MANSETPT   = 0x114E
+
+
+#OVENADDR_OPLINES    = 0x158b
+#   techspec 2.11.14: Track manual, int, R/W, bit 0-15 = track 0-15
+OVENADDR_OPLINES    = 0x1158
 #  Reverse-engineered addresses
 #   Door open (bit 0)
+# ASC - incorrect for MFK 56
 OVENADDR_DOOROPEN   = 0x1007
 #   Temperature limit exceeded
 #    over-temperature safety device class 2, man. secn 11.2
@@ -208,6 +228,7 @@ class ModbusCrcException(ModbusException):
         self.checkcrc=checkcrc
         self.msgbytes=msgbytes
     def __str__(self):
+#        return "Message = " + str(self.msgbytes) + " Expected crc %04x, got %04x" % (self.checkcrc, self.crc)
         return "Expected crc %04x, got %04x" % (self.checkcrc, self.crc)
 
 class ModbusErrorException(ModbusException):
@@ -219,10 +240,9 @@ class ModbusErrorException(ModbusException):
             ecode: the error code enclosed in the message
             msgbytes: the full text of the message"""
         self.ecode=ecode
-        self.ename=MB_ENAMES.get(self.ecode, "Unknown error")
         self.msgbytes=msgbytes
     def __str__(self):
-        return "MODBus error code %d (%s)" % (self.ecode, self.ename)
+        return "MODBus error code %d" % self.ecode
 
 class ModbusBadResponseException(ModbusException):
     """Indicate that response parsing failed for unknown reasons
@@ -328,8 +348,8 @@ def calc_crc16(msg): # string -> int
     """Calculate the CRC16 checksum according to secn 2.8 of the techspec"""
     crc = 0xffff
     for byte in msg:
-        crc ^= ord(byte)
-        for bit in xrange(8):
+        crc ^= ord(chr(byte))
+        for bit in range(8):
             sbit = crc&1
             crc>>=1
             crc^=sbit*0xA001
@@ -378,10 +398,13 @@ def parse_readn_response(msgbytes): # string -> [int...]
     crc, = struct.unpack('<H', msgbytes[3+n_bytes:5+n_bytes])
     checkcrc = calc_crc16(msgbytes[:3+n_bytes])
     if crc != checkcrc:
+        print("ModbusCrcException")
         raise ModbusCrcException(crc, checkcrc, msgbytes)
     n_words = n_bytes>>1
     words = []
-    for word in xrange(n_words):
+    ### ASC fix
+    ### for word in xrange(n_words):
+    for word in range(n_words):
         words.extend(struct.unpack('>H', msgbytes[3+word*2:5+word*2]))
     return words
 
@@ -460,17 +483,24 @@ def parse_err_response(msgbytes): # string -> (bool, int)
     Can raise: ModbusCrcException
     
     Techspec: 2.7"""
+    #print("Response length = ", len(msgbytes))
     if len(msgbytes) < 5:
         return False, None
     crc, = struct.unpack('<H', msgbytes[3:5])
     ignore, func, ecode = struct.unpack('>BBB', msgbytes[:3])
+
     if not func&0x80:
         return False, None
     checkcrc = calc_crc16(msgbytes[:3])
+#    checkcrc = crc
     if crc != checkcrc:
+        print(ecode)
         # we've already established that it _is_ an err_response
+        print("ModbusCrcException")
         raise ModbusCrcException(crc, checkcrc, msgbytes)
     return True, ecode
+
+import datetime
 
 class OvenCtl(object):
     """Control a single oven"""
@@ -490,13 +520,17 @@ class OvenCtl(object):
     def connect_with_retry(self):
         if not self.retries: return socket.create_connection((self.hostname, self.port), self.timeout)
         delay = 0.01
-        for i in xrange(self.retries):
+        ### ASC fix
+        ### for i in xrange(self.retries):
+        for i in range(self.retries):
             try:
                 sock = socket.create_connection((self.hostname, self.port), self.timeout)
                 return sock
             except socket.error as err:
                 left = self.retries - i - 1
-                print '%s; %d tries left' % (err, left)
+                ### ASC fix
+                ### print '%s; %d tries left' % (err, left)
+                print ('%s; %d tries left' % (err, left))
                 if left == 0:
                     raise err
             time.sleep(delay)
@@ -508,26 +542,46 @@ class OvenCtl(object):
         Returns a list of words read
         
         Can raise: ModbusException: trouble at t' mill"""
+#        print("read_req call")
+#        print("do_readn")
+ 
         read_req = make_readn_request(addr, n_words)
+        #print("make_readn_request  = ", hex(addr))
         sock = self.connect_with_retry()
         try:
             sock.send(read_req)
             # slave_addr, function, n_bytes, value(n_words)(2), crc(2)
             resp_len = 5+(n_words*2)
             good_resp = False
-            resp = str()
+            # ASC
+            resp = bytes()
+            resp = "".encode()
+            #print("resp init = ", resp, " len = ", len(resp))
             while not good_resp:
                 if len(resp) >= resp_len:
                     raise ModbusBadResponseException(resp)
+                #ASC
                 resp += sock.recv(resp_len-len(resp))
+                #print(resp)
+                #print("parse_err_response")
                 iserr,e = parse_err_response(resp)
+                #print("parse_err_response ok")
                 if iserr:
+                    try:
+                        name=MB_ENAMES[e]
+                    ### ASC
+                    #except IndexException:
+                    except:
+                        name="Unknown error"
+#                    print("ModbusErrorException")
                     raise ModbusErrorException(e, resp)
                 try:
                     data = parse_readn_response(resp)
+                    #print("parse_readn_response ok")
                 except ModbusShortMessageException:
                     continue
                 good_resp = (len(data) == n_words)
+            #print("do_readn ok ", data[0])
             return data
         finally:
             sock.close()
@@ -542,13 +596,19 @@ class OvenCtl(object):
             sock.send(write_req)
             resp_len = 8 # slave_addr, function, addr(2), data(2), crc(2)
             good_resp = False
-            resp = str()
+            resp = bytes()
             while not good_resp:
                 if len(resp) >= resp_len:
                     raise ModbusBadResponseException(resp)
                 resp += sock.recv(resp_len-len(resp))
                 iserr,e = parse_err_response(resp)
                 if iserr:
+                    try:
+                        name=MB_ENAMES[e]
+                    ### ASC
+                    #except IndexException:
+                    except:
+                        name="Unknown error"
                     raise ModbusErrorException(e, resp)
                 try:
                     resp_addr, resp_data = parse_write_response(resp)
@@ -569,13 +629,19 @@ class OvenCtl(object):
             sock.send(write_req)
             resp_len = 8 # slave_addr, function, addr(2), length(2), crc(2)
             good_resp = False
-            resp = str()
+            resp = bytes()
             while not good_resp:
                 if len(resp) >= resp_len:
                     raise ModbusBadResponseException(resp)
                 resp += sock.recv(resp_len-len(resp))
                 iserr,e = parse_err_response(resp)
                 if iserr:
+                    try:
+                        name=MB_ENAMES[e]
+                    ### ASC
+                    #except IndexException:
+                    except:
+                        name="Unknown error"
                     raise ModbusErrorException(e, resp)
                 try:
                     resp_addr, resp_words = parse_writen_response(resp)
@@ -616,7 +682,15 @@ class OvenCtl(object):
         """Get the oven's current temperature, as a float, in degrees Celsius
         
         Can raise: ModbusException"""
-        return self.read_float(OVENADDR_CURTEMP)
+        temp = self.read_float(OVENADDR_CURTEMP)
+        print("LOG: ", datetime.datetime.now().isoformat(), " Oven temperature: ", temp)
+        return temp
+
+    def get_humidity(self):
+        """Get the oven's current humidity, as a float, in %
+        
+        Can raise: ModbusException"""
+        return self.read_float(OVENADDR_CURHUM)
 
     def get_setpoint(self):
         """Get the oven's temperature setpoint, as a float, in degrees Celsius
@@ -624,6 +698,13 @@ class OvenCtl(object):
         Can raise: ModbusException"""
         return self.read_float(OVENADDR_SETPOINT)
 
+    def get_humidity_setpoint(self):
+        """Get the oven's humidity setpoint, as a float, in %
+        
+        Can raise: ModbusException"""
+        return self.read_float(OVENADDR_HUMIDITY_SETPOINT)
+
+    '''
     def get_mode(self):
         """Get the oven's current operating mode as (int, [str...])
         
@@ -635,7 +716,10 @@ class OvenCtl(object):
             idle    0
         
         Can raise: ModbusException"""
+        print("Get Oven mode")
         mode=self.read_int(OVENADDR_MODE)
+        print("Got Oven mode")
+        
         modes = []
         if mode&0x1000:
             modes.append("basic")
@@ -646,7 +730,7 @@ class OvenCtl(object):
         if not len(modes):
             modes.append("idle")
         return(mode, modes)
-
+    '''
     def get_door_state(self):
         """Return door state as bool (True = Open)
         
@@ -654,6 +738,8 @@ class OvenCtl(object):
         
         Can raise: ModbusException"""
         door=self.read_int(OVENADDR_DOOROPEN)
+        #ASC added
+        door=False
         return(bool(door))
 
     def get_alarm_state(self):
@@ -711,13 +797,26 @@ class OvenCtl(object):
         if setpoint > OVENSAFE_MAXTEMP:
             raise SafetyTempException(True, setpoint, OVENSAFE_MAXTEMP)
         self.write_float(OVENADDR_MANSETPT, setpoint)
-        self.write_float(OVENADDR_BASICSETPT, setpoint)
+        print("LOG: ", datetime.datetime.now().isoformat(), " New set-point: ", setpoint)
+#        self.write_float(OVENADDR_BASICSETPT, setpoint)
+
+    def set_humidity_setpoint(self, setpoint):
+        """Set the oven's humidity setpoint.  Returns None
+        
+        If force is given and True, ignore minor safety concerns (it's passed
+        to self.check_safety)
+        
+        Can raise:
+            ModbusException: Trouble at t' mill"""
+        self.write_float(OVENADDR_HUMIDITY_MANSETPT, setpoint)
+#        self.write_float(OVENADDR_BASICSETPT, setpoint)
 
     def set_mode_idle(self):
         """Set the oven to Idle mode.  Returns None
         
         Can raise: ModbusException"""
-        self.write_int(OVENADDR_MODE, 0)
+        pass
+#        self.write_int(OVENADDR_MODE, 0)
 
     def set_mode_active(self, force=False):
         """Set the oven to an active mode.  Returns None
@@ -726,8 +825,9 @@ class OvenCtl(object):
             SafetyException: Oven in unsafe state
             ModbusException: Trouble at t' mill"""
         self.check_safety(force)
-        self.write_int(OVENADDR_MODE, 0x0800)
+#        self.write_int(OVENADDR_MODE, 0x0800)
 
+    #ASC - need to check this 0-15 bits now
     def set_oplines(self, to_set=0, to_clear=0):
         """Set or clear the selected operation lines
         Returns the new operation line value
@@ -746,7 +846,7 @@ class OvenCtl(object):
     
     @bedew_protection.setter
     def bedew_protection(self, value):
-        self.set_oplines(to_set = 1 if value else 0, to_clear = 0 if value else 1)
+        self.set_oplines(to_set = 64 if value else 0, to_clear = 0 if value else 64)
 
     def temp_ready_tester(self, limit, stabilise=False, acclimatise=0):
         """Create a generator-ish tester for 'temp ready'
@@ -796,17 +896,17 @@ class OvenCtl(object):
         In other words, a _temp_ready_loop closure is a lightweight
         object.  Sort of.  It's probably overcomplicated and unPythonic
         but it's kinda neat"""
-        mode, modes = self.get_mode()
-        if modes == ["idle"]:
-            raise OvenIdleException("Oven is idle, will never reach temp.")
+#        mode, modes = self.get_mode()
+#        if modes == ["idle"]:
+#            raise OvenIdleException("Oven is idle, will never reach temp.")
         newset = self.get_setpoint()
         if newset != setpoint:
             raise OvenSetChangedException(newset, setpoint)
         temp = self.get_temp()
-        print "Temperature: %.2f" % temp,
+        print("Temperature: %.2f" % temp)
         if temp < setpoint - limit or temp > setpoint + limit:
             stable = 0
-            print "- waiting..."
+            print ("- waiting...")
         else:
             stable += 1
             if stable >= (6 if stabilise else 0):
@@ -816,11 +916,11 @@ class OvenCtl(object):
                     elif time.time() > since + acclimatise:
                         print
                         return None
-                    print "- acclimatising..."
+                    print ("- acclimatising...")
                 else:
                     return None
             else:
-                print "- stabilising..."
+                print ("- stabilising...")
         return lambda: self._temp_ready_loop(
             limit, stabilise, acclimatise, since, stable, setpoint)
 
@@ -876,11 +976,11 @@ def parse_cmdline():
     options, args = parser.parse_args()
 
     if not options.host:
-        print "ERROR: -H/--host is required"
+        print ("ERROR: -H/--host is required")
         sys.exit(2)
 
     if sum(map(lambda v:bool(v is not None), [options.query, options.idle, options.temp])) != 1:
-        print "ERROR: Please specify exactly one action"
+        print ("ERROR: Please specify exactly one action")
         sys.exit(2)
 
     return options
@@ -894,97 +994,106 @@ if __name__ == '__main__':
     try:
         if options.query:
             try:
+                print("Checking for alarms")
                 alarm, note = oven.get_alarm_state()
                 if alarm:
                     try:
-                        print "ALARM: %s" % oven.get_alarm_text().strip()
+                        print ("ALARM: %s" % oven.get_alarm_text().strip())
                     except ModbusException as err:
-                        print "Failed to get alarm text: %s" % err
+                        print ("Failed to get alarm text: %s" % err)
                 elif note:
                     try:
-                        print "Note: %s" % oven.get_alarm_text().strip()
+                        print ("Note: %s" % oven.get_alarm_text().strip())
                     except ModbusException as err:
-                        print "Failed to get note text: %s" % err
+                        print ("Failed to get note text: %s" % err)
             except ModbusException as err:
-                print "Failed to get alarm state: %s" % err
+                print ("Failed to get alarm state: %s" % err)
+            '''
             try:
                 mode,modes = oven.get_mode()
-                print "Mode: %04x (%s)" % (mode, '&'.join(modes))
+                print ("Mode: %04x (%s)" % (mode, '&'.join(modes)))
             except ModbusException as err:
-                print "Failed to get oven mode: %s" % err
+#                print("ModbusException")
+                print ("Failed to get oven mode: %s" % err)
+                #sys.exit(1)
+            '''
             try:
                 if oven.bedew_protection:
-                    print "Bedew protection active"
+                    print ("Bedew protection active")
             except ModbusException as err:
-                print "Failed to get bedew operation status: %s" % err
+                print ("Failed to get bedew operation status: %s" % err)
+            '''
             try:
-                print "Door: %s" % ("open" if oven.get_door_state() else "closed")
+                print ("Door: %s" % ("open" if oven.get_door_state() else "closed"))
             except ModbusException as err:
-                print "Failed to get door state: %s" % err
+                print ("Failed to get door state: %s" % err)
+            '''
             try:
-                print "Temperature: %.2f" % (oven.get_temp(),)
+                print ("Temperature: %.2f" % (oven.get_temp()))
             except ModbusException as err:
-                print "Failed to get oven temperature: %s" % err
+                print ("Failed to get oven temperature: %s" % err)
             try:
-                print "Target temperature: %.2f" % (oven.get_setpoint(),)
+                print ("Target temperature: %.2f" % (oven.get_setpoint()))
             except ModbusException as err:
-                print "Failed to get oven setpoint: %s" % err
+                print ("Failed to get oven setpoint: %s" % err)
         elif options.idle:
             try:
                 oven.set_mode_idle()
             except ModbusException as err:
-                print "Failed to set oven idle: %s" % err
+                print ("Failed to set oven idle: %s" % err)
                 sys.exit(1)
+            
             try:
                 oven.bedew_protection = bool(options.dry)
             except ModbusException as err:
-                print "Failed to set bedew status: %s" % err
-                print "(ignoring)"
+                print ("Failed to set bedew status: %s" % err)
+                print ("(ignoring)")
+            
         elif options.temp is not None:
             try:
                 try:
                     try:
                         oven.set_setpoint(options.temp, options.force)
                     except ModbusException as err:
-                        print "Failed to set oven setpoint: %s" % err
+                        print ("Failed to set oven setpoint: %s" % err)
                         sys.exit(1)
                     try:
                         oven.set_mode_active(options.force)
                     except ModbusException as err:
-                        print "Failed to set oven to active: %s" % err
+                        print ("Failed to set oven to active: %s" % err)
                         # Just for safety, set the oven back to idle.
                         # After all, our exception might have happened
                         # while parsing the response, and the oven might
                         # actually be active at this point
-                        print "Setting mode back to idle"
+                        print ("Setting mode back to idle")
                         try:
                             oven.set_mode_idle()
                         except ModbusException as err:
-                            print "Failed to set oven idle: %s" % err
+                            print ("Failed to set oven idle: %s" % err)
                         sys.exit(1)
                     try:
                         oven.bedew_protection = bool(options.dry)
                     except ModbusException as err:
-                        print "Failed to set bedew status: %s" % err
-                        print "(ignoring)"
+                        print ("Failed to set bedew status: %s" % err)
+                        print ("(ignoring)")
                 except SafetyException as err:
-                    print "Safety interlock: %s" % err
+                    print ("Safety interlock: %s" % err)
                     sys.exit(4)
                 if options.wait or options.stable:
                     try:
                         oven.wait_for_temp(options.limit, options.stable, options.acclimatise*60)
                     except OvenStatusException as err:
-                        print err
+                        print (err)
                         sys.exit(5)
             except Exception as err:
-                print "Exception occurred (%s), setting mode back to idle" % err
+                print ("Exception occurred (%s), setting mode back to idle" % err)
                 try:
                     oven.set_mode_idle()
                 except ModbusException as err:
-                    print "Failed to set oven idle: %s" % err
+                    print ("Failed to set oven idle: %s" % err)
                 sys.exit(1)
         else:
             assert 0, "No actions taken!" # Should be impossible
     except socket.timeout as err:
-        print "Socket error: %s" % err
+        print ("Socket error: %s" % err)
         sys.exit(3)

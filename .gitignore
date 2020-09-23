@@ -4,3 +4,5 @@ nmbdump
 *.pyc
 record
 *.csv
+*_bart.*
+*.log

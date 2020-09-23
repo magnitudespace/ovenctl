@@ -348,7 +348,7 @@ def calc_crc16(msg): # string -> int
     """Calculate the CRC16 checksum according to secn 2.8 of the techspec"""
     crc = 0xffff
     for byte in msg:
-        crc ^= ord(chr(byte))
+        crc ^= ord(byte)
         for bit in range(8):
             sbit = crc&1
             crc>>=1
@@ -659,6 +659,13 @@ class OvenCtl(object):
         data = self.do_readn(addr, 2)
         return decode_float(data)
 
+    def read_floats(self, addr, cnt):
+        """Read a floating-point value from the oven at address addr
+        
+        Can raise: ModbusException"""
+        data = self.do_readn(addr, cnt*2)
+        return [decode_float(data[x*2:(x+1)*2]) for x in range(cnt)]
+
     def write_float(self, addr, value):
         """Write a floating-point value to the oven at address addr
         
@@ -683,7 +690,7 @@ class OvenCtl(object):
         
         Can raise: ModbusException"""
         temp = self.read_float(OVENADDR_CURTEMP)
-        print("LOG: ", datetime.datetime.now().isoformat(), " Oven temperature: ", temp)
+        # print("LOG: ", datetime.datetime.now().isoformat(), " Oven temperature: ", temp)
         return temp
 
     def get_humidity(self):
@@ -948,6 +955,27 @@ class OvenCtl(object):
                 return
             time.sleep(10)
 
+    SETPOINT_TEMPERATURE = 0x10B2
+    SETPOINT_HUMIDITY = 0x10B4
+    SETPOINT_FANSPEED = 0x10B6
+    TRACK_READ = 0x1292
+
+    def get_temp_humidity_fanspeed(self):
+        return self.read_floats(0x10B2, 3)
+
+    # def get_setpoint_temperature(self):
+    #     return self.read_float(self.SETPOINT_TEMPERATURE)
+
+    # def get_setpoint_humidity(self):
+    #     return self.read_float(self.SETPOINT_HUMIDITY)
+
+    # def get_setpoint_fanspeed(self):
+    #     return self.read_float(self.SETPOINT_FANSPEED)
+
+    def get_track(self):
+        return self.read_int(self.TRACK_READ)
+
+
 def parse_cmdline():
     parser = optparse.OptionParser()
     parser.usage = "%prog -H hostname [-p port] [options]"
@@ -994,48 +1022,11 @@ if __name__ == '__main__':
     try:
         if options.query:
             try:
-                print("Checking for alarms")
-                alarm, note = oven.get_alarm_state()
-                if alarm:
-                    try:
-                        print ("ALARM: %s" % oven.get_alarm_text().strip())
-                    except ModbusException as err:
-                        print ("Failed to get alarm text: %s" % err)
-                elif note:
-                    try:
-                        print ("Note: %s" % oven.get_alarm_text().strip())
-                    except ModbusException as err:
-                        print ("Failed to get note text: %s" % err)
+                temp, humidity, fanspeed = oven.get_temp_humidity_fanspeed()
+                values = [datetime.datetime.now().isoformat(), oven.get_temp(), temp, oven.get_humidity(), humidity, fanspeed, oven.get_track()]
+                print(",".join([str(v) for v in values]))
             except ModbusException as err:
-                print ("Failed to get alarm state: %s" % err)
-            '''
-            try:
-                mode,modes = oven.get_mode()
-                print ("Mode: %04x (%s)" % (mode, '&'.join(modes)))
-            except ModbusException as err:
-#                print("ModbusException")
-                print ("Failed to get oven mode: %s" % err)
-                #sys.exit(1)
-            '''
-            try:
-                if oven.bedew_protection:
-                    print ("Bedew protection active")
-            except ModbusException as err:
-                print ("Failed to get bedew operation status: %s" % err)
-            '''
-            try:
-                print ("Door: %s" % ("open" if oven.get_door_state() else "closed"))
-            except ModbusException as err:
-                print ("Failed to get door state: %s" % err)
-            '''
-            try:
-                print ("Temperature: %.2f" % (oven.get_temp()))
-            except ModbusException as err:
-                print ("Failed to get oven temperature: %s" % err)
-            try:
-                print ("Target temperature: %.2f" % (oven.get_setpoint()))
-            except ModbusException as err:
-                print ("Failed to get oven setpoint: %s" % err)
+                print( "Failed to get parameter: %s" % err)
         elif options.idle:
             try:
                 oven.set_mode_idle()
